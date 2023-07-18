@@ -29,6 +29,7 @@ export const Tool = ({
   label,
   shortcut,
   onClick,
+  showControl = true,
 }) => {
   let currentShortcut = shortcut;
   const dynamic = tool?.dynamic ?? false;
@@ -156,7 +157,7 @@ export const Tool = ({
           </Elem>
         )
       )}
-      {showControls && (
+      {showControls && showControl && (
         <Elem name="controls" onClickCapture={e => e.stopPropagation()}>
           <Elem name="controls-body">
             {controls}

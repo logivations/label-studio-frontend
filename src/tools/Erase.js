@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { observer } from 'mobx-react';
 import { types } from 'mobx-state-tree';
 
@@ -27,6 +27,7 @@ const IconDot = ({ size }) => {
 };
 
 const ToolView = observer(({ item }) => {
+  const [show, setShow] = useState(true);
   return (
     <Tool
       label="Eraser"
@@ -37,12 +38,15 @@ const ToolView = observer(({ item }) => {
       tool={item}
       disabled={!item.getSelectedShape}
       onClick={() => {
-        if (item.selected) return;
-
+        if (item.selected) {
+          setShow(!show);
+          return;
+        }
         item.manager.selectTool(item, true);
       }}
       icon={item.iconClass}
       controls={item.controls}
+      showControl = {show}
     />
   );
 });
