@@ -95,6 +95,7 @@
     "d3-color": "3.1.0",
     "loader-utils": "2.0.4",
     "magic-wand-js": "^1.0.0",
+    "or": "^0.2.0",
     "papaparse": "^5.3.1",
     "rc-tree": "^5.3.0",
     "react-beautiful-dnd": "^13.1.1",
