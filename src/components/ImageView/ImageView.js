@@ -1,4 +1,13 @@
-import React, { Component, createRef, forwardRef, Fragment, memo, useEffect, useRef, useState } from 'react';
+import React, {
+  Component,
+  createRef,
+  forwardRef,
+  Fragment,
+  memo,
+  useEffect,
+  useRef,
+  useState
+} from 'react';
 import { Group, Layer, Line, Rect, Stage } from 'react-konva';
 import { observer } from 'mobx-react';
 import { getEnv, getRoot, isAlive } from 'mobx-state-tree';
@@ -21,6 +30,7 @@ import { debounce } from '../../utils/debounce';
 import Constants from '../../core/Constants';
 import { fixRectToFit } from '../../utils/image';
 import {
+  FF_DBLCLICK_DELAY,
   FF_DEV_1285,
   FF_DEV_1442,
   FF_DEV_3077,
@@ -28,7 +38,7 @@ import {
   FF_DEV_4081,
   FF_LSDV_4583_6,
   FF_LSDV_4711,
-  FF_LSDV_4930,
+  FF_LSDV_4930, FF_ZOOM_OPTIM,
   isFF
 } from '../../utils/feature-flags';
 import { Pagination } from '../../common/Pagination/Pagination';
@@ -64,6 +74,9 @@ const splitRegions = (regions) => {
 };
 
 const Region = memo(({ region, showSelected = false }) => {
+  if (isFF(FF_DBLCLICK_DELAY)) {
+    return useObserver(() => Tree.renderItem(region, region.annotation, true));
+  }
   return useObserver(() => region.inSelection !== showSelected ? null : Tree.renderItem(region, region.annotation, false));
 });
 
@@ -245,8 +258,8 @@ const TransformerBack = observer(({ item }) => {
           }}
           onDragStart={e => {
             dragStartPointRef.current = {
-              x: e.target.getAttr('x'),
-              y: e.target.getAttr('y'),
+              x: item.canvasToInternalX(e.target.getAttr('x')),
+              y: item.canvasToInternalY(e.target.getAttr('y')),
             };
           }}
           dragBoundFunc={(pos) => {
@@ -385,10 +398,15 @@ const SelectionLayer = observer(({ item, selectionArea }) => {
  * but now they are rerendered just by mistake because of unmemoized `splitRegions` in main render.
  * This is temporary solution to pass in relevant props changed on window resize.
  */
-const Selection = observer(({ item, selectionArea, ...triggeredOnResize }) => {
+const Selection = observer(({ item, ...triggeredOnResize }) => {
+  const { selectionArea } = item;
+
   return (
     <>
-      <SelectedRegions item={item} selectedRegions={item.selectedRegions} {...triggeredOnResize} />
+      { isFF(FF_DBLCLICK_DELAY)
+        ? <Layer name="selection-regions-layer" />
+        : <SelectedRegions item={item} selectedRegions={item.selectedRegions} {...triggeredOnResize} />
+      }
       <SelectionLayer item={item} selectionArea={selectionArea} />
     </>
   );
@@ -555,6 +573,7 @@ export default observer(
     handleMouseDown = e => {
       const { item } = this.props;
       const isPanTool = item.getToolsManager().findSelectedTool()?.fullName === 'ZoomPanTool';
+      const isMoveTool = item.getToolsManager().findSelectedTool()?.fullName === 'MoveTool';
 
       if (isFF(FF_LSDV_4930)) {
         this.mouseDownPoint = { x: e.evt.offsetX, y: e.evt.offsetY };
@@ -568,13 +587,30 @@ export default observer(
       if (p && p.className === 'Transformer') return;
 
       const handleMouseDown = () => {
+        const isRightElementToCatchToolInteractions = el => {
+          // It could be ruler ot segmentation
+          if (el.nodeType === 'Group') {
+            if ('ruler' === el?.attrs?.name) {
+              return true;
+            }
+            // segmentation is specific for Brushes
+            // but click interaction on the region covers the case of the same MoveTool interaction here,
+            // so it should ignore move tool interaction to prevent conflicts
+            if ((!isFF(FF_DBLCLICK_DELAY) || !isMoveTool)
+              && 'segmentation' === el?.attrs?.name) {
+              return true;
+            }
+          }
+          return false;
+        };
+
         if (
           // create regions over another regions with Cmd/Ctrl pressed
           item.getSkipInteractions() ||
           e.target === item.stageRef ||
           findClosestParent(
             e.target,
-            el => el.nodeType === 'Group' && ['ruler', 'segmentation'].indexOf(el?.attrs?.name) > -1,
+            isRightElementToCatchToolInteractions,
           )
         ) {
           window.addEventListener('mousemove', this.handleGlobalMouseMove);
@@ -871,8 +907,6 @@ export default observer(
       // TODO fix me
       if (!store.task || !item.currentSrc) return null;
 
-      const regions = item.regs;
-
       const containerStyle = {};
 
       const containerClassName = styles.container;
@@ -886,7 +920,7 @@ export default observer(
         containerStyle['height'] = item.height;
       }
 
-      if (!this.props.store.settings.enableSmoothing && item.zoomScale > 1) {
+      if (!store.settings.enableSmoothing && item.zoomScale > 1) {
         containerStyle['imageRendering'] = 'pixelated';
       }
 
@@ -902,23 +936,6 @@ export default observer(
       ];
 
       if (paginationEnabled) wrapperClasses.push(styles.withPagination);
-
-      const {
-        brushRegions,
-        shapeRegions,
-      } = splitRegions(regions);
-
-      const {
-        brushRegions: suggestedBrushRegions,
-        shapeRegions: suggestedShapeRegions,
-      } = splitRegions(item.suggestions);
-
-      const renderableRegions = Object.entries({
-        brush: brushRegions,
-        shape: shapeRegions,
-        suggestedBrush: suggestedBrushRegions,
-        suggestedShape: suggestedShapeRegions,
-      });
 
       const [toolsReady, stageLoading] = isFF(FF_LSDV_4583_6) ? [true, false] : [
         item.hasTools, item.stageWidth <= 1,
@@ -936,7 +953,7 @@ export default observer(
           {paginationEnabled ? (
             <div className={styles.pagination}>
               <Pagination
-                size='small'
+                size="small"
                 outline={false}
                 align="left"
                 noPadding
@@ -1019,23 +1036,12 @@ export default observer(
             {stageLoading || !toolsReady ? (
               <div className={styles.loading}><LoadingOutlined /></div>
             ) : (imageIsLoaded) ? (
-              <Stage
-                ref={ref => {
-                  item.setStageRef(ref);
-                }}
-                className={[styles['image-element'],
-                  ...imagePositionClassnames,
-                ].join(' ')}
-                width={item.canvasSize.width}
-                height={item.canvasSize.height}
-                scaleX={item.zoomScale}
-                scaleY={item.zoomScale}
-                x={item.zoomingPositionX}
-                y={item.zoomingPositionY}
-                offsetX={item.stageTranslate.x}
-                offsetY={item.stageTranslate.y}
-                rotation={item.rotation}
+              <EntireStage
+                item={item}
+                crosshairRef={this.crosshairRef}
                 onClick={this.handleOnClick}
+                imagePositionClassnames={imagePositionClassnames}
+                state={this.state}
                 onMouseEnter={() => {
                   if (this.crosshairRef.current) {
                     this.crosshairRef.current.updateVisibility(true);
@@ -1068,54 +1074,7 @@ export default observer(
                 onMouseUp={this.handleMouseUp}
                 onWheel={item.zoom ? this.handleZoom : () => {
                 }}
-              >
-                {/* Hack to keep stage in place when there's no regions */}
-                {regions.length === 0 && (
-                  <Layer>
-                    <Line points={[0, 0, 0, 1]} stroke="rgba(0,0,0,0)" />
-                  </Layer>
-                )}
-                {item.grid && item.sizeUpdated && <ImageGrid item={item} />}
-
-                {
-                  isFF(FF_LSDV_4930)
-                    ? <TransformerBack item={item} />
-                    : null
-                }
-
-                {renderableRegions.map(([groupName, list]) => {
-                  const isBrush = groupName.match(/brush/i) !== null;
-                  const isSuggestion = groupName.match('suggested') !== null;
-
-                  return list.length > 0 ? (
-                    <Regions
-                      key={groupName}
-                      name={groupName}
-                      regions={list}
-                      useLayers={isBrush === false}
-                      suggestion={isSuggestion}
-                    />
-                  ) : <Fragment key={groupName} />;
-                })}
-                <Selection
-                  item={item}
-                  selectionArea={item.selectionArea}
-                  isPanning={this.state.isPanning}
-                  // to trigger rerender on resize
-                  stageWidth={item.canvasSize.width}
-                  stageHeight={item.canvasSize.height}
-                  stageScale={item.zoomScale}
-                />
-                <DrawingRegion item={item} />
-
-                {item.crosshair && (
-                  <Crosshair
-                    ref={this.crosshairRef}
-                    width={isFF(FF_DEV_1285) ? item.stageWidth : item.stageComponentSize.width}
-                    height={isFF(FF_DEV_1285) ? item.stageHeight : item.stageComponentSize.height}
-                  />
-                )}
-              </Stage>
+              />
             ) : null}
           </div>
 
@@ -1140,3 +1099,155 @@ export default observer(
     }
   },
 );
+
+const EntireStage = observer(({
+  item,
+  imagePositionClassnames,
+  state,
+  onClick,
+  onMouseEnter,
+  onMouseLeave,
+  onDragMove,
+  onMouseDown,
+  onMouseMove,
+  onMouseUp,
+  onWheel,
+  crosshairRef,
+}) => {
+  const { store } = item;
+  let size, position;
+
+  if (isFF(FF_ZOOM_OPTIM)) {
+    size = {
+      width: item.containerWidth,
+      height: item.containerHeight,
+    };
+    position = {
+      x: item.zoomingPositionX + item.alignmentOffset.x,
+      y: item.zoomingPositionY + item.alignmentOffset.y,
+    };
+  } else {
+    size = { ...item.canvasSize };
+    position = {
+      x: item.zoomingPositionX,
+      y: item.zoomingPositionY,
+    };
+  }
+
+  return (
+    <Stage
+      ref={ref => {
+        item.setStageRef(ref);
+      }}
+      className={[styles['image-element'],
+        ...imagePositionClassnames,
+      ].join(' ')}
+      width={size.width}
+      height={size.height}
+      scaleX={item.zoomScale}
+      scaleY={item.zoomScale}
+      x={position.x}
+      y={position.y}
+      offsetX={item.stageTranslate.x}
+      offsetY={item.stageTranslate.y}
+      rotation={item.rotation}
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      onDragMove={onDragMove}
+      onMouseDown={onMouseDown}
+      onMouseMove={onMouseMove}
+      onMouseUp={onMouseUp}
+      onWheel={onWheel}
+    >
+      <StageContent
+        item={item}
+        store={store}
+        state={state}
+        crosshairRef={crosshairRef}
+      />
+    </Stage>
+  );
+});
+
+const StageContent = observer(({
+  item,
+  store,
+  state,
+  crosshairRef,
+}) => {
+  if (!isAlive(item)) return null;
+  if (!store.task || !item.currentSrc) return null;
+
+  const regions = item.regs;
+  const paginationEnabled = !!item.isMultiItem;
+  const wrapperClasses = [
+    styles.wrapperComponent,
+    item.images.length > 1 ? styles.withGallery : styles.wrapper,
+  ];
+
+  if (paginationEnabled) wrapperClasses.push(styles.withPagination);
+
+  const {
+    brushRegions,
+    shapeRegions,
+  } = splitRegions(regions);
+
+  const {
+    brushRegions: suggestedBrushRegions,
+    shapeRegions: suggestedShapeRegions,
+  } = splitRegions(item.suggestions);
+
+  const renderableRegions = Object.entries({
+    brush: brushRegions,
+    shape: shapeRegions,
+    suggestedBrush: suggestedBrushRegions,
+    suggestedShape: suggestedShapeRegions,
+  });
+
+  return (
+    <>
+      {/* Hack to keep stage in place when there's no regions */}
+      {regions.length === 0 && (
+        <Layer>
+          <Line points={[0, 0, 0, 1]} stroke="rgba(0,0,0,0)" />
+        </Layer>
+      )}
+      {item.grid && item.sizeUpdated && <ImageGrid item={item} />}
+
+      {
+        isFF(FF_LSDV_4930)
+          ? <TransformerBack item={item} />
+          : null
+      }
+
+      {renderableRegions.map(([groupName, list]) => {
+        const isBrush = groupName.match(/brush/i) !== null;
+        const isSuggestion = groupName.match('suggested') !== null;
+
+        return list.length > 0 ? (
+          <Regions
+            key={groupName}
+            name={groupName}
+            regions={list}
+            useLayers={isBrush === false}
+            suggestion={isSuggestion}
+          />
+        ) : <Fragment key={groupName} />;
+      })}
+      <Selection
+        item={item}
+        isPanning={state.isPanning}
+      />
+      <DrawingRegion item={item} />
+
+      {item.crosshair && (
+        <Crosshair
+          ref={crosshairRef}
+          width={isFF(FF_ZOOM_OPTIM) ? item.containerWidth : (isFF(FF_DEV_1285) ? item.stageWidth : item.stageComponentSize.width)}
+          height={isFF(FF_ZOOM_OPTIM) ? item.containerHeight : (isFF(FF_DEV_1285) ? item.stageHeight : item.stageComponentSize.height)}
+        />
+      )}
+    </>
+  );
+});
